@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/echenim/TravelPathOptimizer/internal/models/entities"
+	"github.com/echenim/TravelPathOptimizer/internal/models/views"
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geojson"
 	"github.com/paulmach/orb/planar"
-	"github.com/plak3com/route-optimizer-engine/internal/models/entities"
-	"github.com/plak3com/route-optimizer-engine/internal/models/views"
 )
 
 func OptimizerRoute(tomtomAPIKey string, from, to string, driverHourThreshold, fuelCapacityThreshold int, truck entities.Truck) (views.RouteResponse, error) {

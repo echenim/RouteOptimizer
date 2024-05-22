@@ -1,4 +1,4 @@
-module github.com/plak3com/route-optimizer-engine
+module github.com/echenim/TravelPathOptimizer
 
 go 1.21.3
 
