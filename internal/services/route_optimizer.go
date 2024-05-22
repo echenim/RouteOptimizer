@@ -4,138 +4,157 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
-	"strconv"
 	"strings"
 
+	"github.com/paulmach/orb"
+	"github.com/paulmach/orb/geojson"
+	"github.com/paulmach/orb/planar"
 	"github.com/plak3com/route-optimizer-engine/internal/models/entities"
 	"github.com/plak3com/route-optimizer-engine/internal/models/views"
 )
 
-func OptimizerRoute(tomtom_api_key, from, to string, driverHourThreshold, fuelCapacityThreshold int, truck entities.Truck) (views.RouteResponse, error) {
-	return findBestRoutes(tomtom_api_key, from, to, driverHourThreshold, fuelCapacityThreshold, truck)
+func OptimizerRoute(tomtomAPIKey string, from, to string, driverHourThreshold, fuelCapacityThreshold int, truck entities.Truck) (views.RouteResponse, error) {
+	routeURL := buildRouteURL(tomtomAPIKey, from, to, truck)
+	return fetchRoute(routeURL)
 }
 
-func findBestRoutes(tomtom_api_key, from, to string, driverHourThreshold, fuelCapacityThreshold int, truck entities.Truck) (views.RouteResponse, error) {
-	// Construct the base URL with truck dimensions and weight
-	url := fmt.Sprintf("https://api.tomtom.com/routing/1/calculateRoute/%s:%s/json?maxHeight=%d&maxWeight=%d&key=%s",
-		from, to, truck.Dimensions.Height, truck.Weight, tomtom_api_key)
+func buildRouteURL(tomtomAPIKey, from, to string, truck entities.Truck) string {
+	baseURL := fmt.Sprintf("https://api.tomtom.com/routing/1/calculateRoute/%s:%s/json?key=%s", from, to, tomtomAPIKey)
+	params := prepareRouteParameters(truck)
+	fullURL := fmt.Sprintf("%s%s", baseURL, params)
+	return fullURL
+}
 
-	// Add additional parameters based on truck properties
-	if truck.Hazmat {
-		url += "&avoid=tunnels"
+func prepareRouteParameters(truck entities.Truck) string {
+	var params []string
+	params = append(params, formatVehicleSpecs(truck))
+	params = append(params, handleRouteRestrictions(truck.RouteRestrictions)...)
+	params = append(params, handleTrafficPatterns(truck.TrafficPatterns)...)
+	params = append(params, handleFuelNeeds(truck)...)
+	params = append(params, handleDriverHours(truck)...)
+	return strings.Join(params, "&")
+}
+
+// Separate functions for different concerns
+func formatVehicleSpecs(truck entities.Truck) string {
+	return fmt.Sprintf("&maxHeight=%d&maxWeight=%d", truck.Dimensions.Height, truck.Weight)
+}
+
+func handleRouteRestrictions(restrictions []string) []string {
+	var params []string
+	for _, restriction := range restrictions {
+		params = append(params, fmt.Sprintf("&avoid=%s", restriction))
 	}
+	return params
+}
 
-	// Consider route restrictions based on truck properties
-	for _, restriction := range truck.RouteRestrictions {
-		switch restriction {
-		case "tollRoads":
-			url += "&avoid=tollRoads"
-		case "motorways":
-			url += "&avoid=motorways"
-		case "ferries":
-			url += "&avoid=ferries"
-			// Add more cases as needed
+func handleTrafficPatterns(patterns map[string]string) []string {
+	var params []string
+	for location, trafficLevel := range patterns {
+		// Determine action based on the traffic level
+		switch trafficLevel {
+		case "high":
+			avoidParam := fmt.Sprintf("avoidArea=%s", formatGeoFencing(location))
+			params = append(params, avoidParam)
+		case "medium":
+			// For medium traffic, you might choose to simply monitor the area, or use real-time traffic data to decide dynamically
+			monitorParam := fmt.Sprintf("monitorArea=%s", formatGeoFencing(location))
+			params = append(params, monitorParam)
+		// Low traffic doesn't require any action
+		case "low":
+			continue
+		default:
+			// Handle unknown traffic levels or implement additional logic as needed
+			continue
 		}
 	}
+	return params
+}
 
-	// Logic to avoid high-traffic areas
-	for location, pattern := range truck.TrafficPatterns {
-		if pattern == "high" {
-			// Logic to adjust the route to avoid this location
-			// This could involve adding an intermediate waypoint that routes around the high traffic area
-			// or using TomTom API features to avoid certain areas
-			avoidArea := calculateDetour(location)
-			url += fmt.Sprintf("&avoid=%s", avoidArea)
+// Helper function to convert a location identifier to a geo-fencing parameter suitable for API requests
+// This is a stub and needs actual logic based on how locations are defined and how geo-fencing works with your chosen API
+// TODO: implement conversion logic
+func formatGeoFencing(location string) string {
+	return location
+}
+
+// handleFuelNeeds determines the need for fuel based on the truck's fuel capacity and
+// adds appropriate waypoints to refuel if necessary.
+func handleFuelNeeds(truck entities.Truck, stations []entities.FuelStation, route *geojson.Feature) []string {
+	var params []string
+	fuelNeeded := calculateFuelNeeded(truck)
+	if truck.FuelCapacity < fuelNeeded {
+		stationsAlongRoute := findStationsAlongRoute(truck.CurrentLocation, truck.Destination, stations, route)
+		optimalStations := selectOptimalFuelStations(stationsAlongRoute, truck)
+		for _, station := range optimalStations {
+			params = append(params, fmt.Sprintf("&addWaypoints=%s", station.Location))
 		}
 	}
+	return params
+}
 
-	// Consider Fuel Stations if fuel capacity is a constraint
-	// Logic for Fuel Capacity
-	if truck.FuelCapacity < fuelCapacityThreshold {
-		// Find fuel stations along the route
-		stationsAlongRoute := findStationsAlongRoute(from, to, truck.FuelStations)
+// calculateFuelNeeded estimates the fuel required for the journey based on distance and truck's efficiency.
+// TODO: implement
+func calculateFuelNeeded(truck entities.Truck) int {
+	distance := calculateDistance(truck.CurrentLocation, truck.Destination)
+	return distance
+}
 
-		// Modify the URL to include waypoints for fuel stations
-		// Adding multiple fuel stations as waypoints could make the routing less efficient.
-		// We will need a strategy to select the most optimal fuel stations, considering factors
-		// like distance from the route, fuel prices, and station amenities.
-		for _, station := range stationsAlongRoute {
-			url += fmt.Sprintf("&waypoints=%s", station.Location)
-		}
-	}
+// selectOptimalFuelStations selects the most strategically placed fuel stations to minimize route deviations.
+func selectOptimalFuelStations(stations []entities.FuelStation, truck entities.Truck) []entities.FuelStation {
+	return stations
+}
 
-	// Handle refrigeration needs
-	if truck.Refrigeration {
-		// Logic to prioritize routes with shorter travel times or specific conditions
-		// This could be a placeholder as TomTom API might not support this directly
-	}
+// calculateDistance simulates distance calculation between two geographic locations.
+// TODO: full implementation of distance calculation is needed
+func calculateDistance(from, to entities.Location) int {
+	return 100
+}
 
-	// Add logic for axle weight (assuming TomTom API supports this)
-	if len(truck.AxleWeight) > 0 {
-		axleWeights := make([]string, len(truck.AxleWeight))
-		for i, weight := range truck.AxleWeight {
-			axleWeights[i] = strconv.Itoa(weight)
-		}
-		url += "&axleWeight=" + strings.Join(axleWeights, ",")
-	}
+func handleDriverHours(truck entities.Truck) []string {
+	var params []string
+	// Add logic for driver hours
+	return params
+}
 
-	// Handle driver hours - determine if a rest stop is needed
-	if truck.DriverHours > driverHourThreshold {
-		// Logic to include rest areas in the route
-		url += "&restAreas=" + strings.Join(truck.RestAreas, ",")
-	}
-
-	// avoid toll roads if the truck doesn't have a toll system
-	if truck.TollSystem == "" {
-		url += "&avoid=tollRoads"
-	}
-
-	// Send request to TomTom API
+func fetchRoute(url string) (views.RouteResponse, error) {
 	resp, err := http.Get(url)
 	if err != nil {
-		log.Fatalf("Error occurred while sending request to TomTom API: %s", err)
+		return views.RouteResponse{}, fmt.Errorf("failed to send request to TomTom API: %w", err)
 	}
-
 	defer resp.Body.Close()
-
-	// Handle the response
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalf("Error occurred while reading the response body: %s", err)
+		return views.RouteResponse{}, fmt.Errorf("failed to read response body: %w", err)
 	}
-
-	// Assuming RouteResponse is defined to parse the relevant data
 	var routeResponse views.RouteResponse
 	if err := json.Unmarshal(body, &routeResponse); err != nil {
-		log.Fatalf("Error occurred while unmarshalling the JSON response: %s", err)
+		return views.RouteResponse{}, fmt.Errorf("failed to unmarshal JSON response: %w", err)
 	}
-
 	return routeResponse, nil
 }
 
-func findStationsAlongRoute(from, to string, stations []entities.FuelStation) []entities.FuelStation {
+// Improved function to find stations along the route using geographic calculations
+func findStationsAlongRoute(from, to entities.Location, stations []entities.FuelStation, route *geojson.Feature) []entities.FuelStation {
 	var stationsAlongRoute []entities.FuelStation
-	// Logic to determine if a station falls along the route
-	// This is a placeholder. We would need
-	// a more sophisticated approach to determine if a station is along the route.
+
+	routeLine, _ := route.Geometry.(orb.LineString)
 	for _, station := range stations {
-		if isStationAlongRoute(from, to, station) {
+		if isStationAlongRoute(routeLine, station.Location, 1000) { // 1000 meters tolerance
 			stationsAlongRoute = append(stationsAlongRoute, station)
 		}
 	}
 	return stationsAlongRoute
 }
 
-func isStationAlongRoute(from, to string, station entities.FuelStation) bool {
-	// Placeholder logic to determine if a station is along the route
-	// We might use geographic calculations or additional API queries
-	return true
+// Uses geospatial logic to check if a station is close enough to the route
+func isStationAlongRoute(route orb.LineString, stationLocation orb.Point, tolerance float64) bool {
+	distance := planar.LineStringDistanceFromPoint(route, stationLocation)
+	return distance <= tolerance
 }
 
+// TODO: implement
 func calculateDetour(location string) string {
-	// Placeholder logic to calculate a detour around a high-traffic area
-	// to determine an effective detour
 	return "someDetourArea"
 }
